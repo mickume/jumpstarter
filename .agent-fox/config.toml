@@ -1,0 +1,34 @@
+## agent-fox configuration
+## Uncomment and edit values to customize.
+
+[orchestrator]
+## Maximum parallel sessions (1-8, default: 2)
+parallel = 2
+## Shell command to run after each coder session (default: "")
+quality_gate = "make check"
+## Maximum USD spend per session, 0 = unlimited (default: 8.0)
+max_budget_usd = 8.0
+
+[models]
+## Model tier for coding tasks (default: "ADVANCED")
+coding = "ADVANCED"
+
+[archetypes]
+## Enable coder archetype (default: true)
+coder = true
+## Enable skeptic archetype (default: true)
+skeptic = true
+## Enable verifier archetype (default: true)
+verifier = true
+## Enable oracle archetype (default: true)
+oracle = true
+## Enable auditor archetype (default: true)
+auditor = true
+
+[archetypes.instances]
+## Number of verifier instances (1-5, default: 2)
+verifier = 2
+
+# [security]
+
+## For all configuration options, see docs/config-reference.md
