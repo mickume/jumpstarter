@@ -54,7 +54,7 @@ This project uses spec-driven development. Specifications live in
 | Command | What it does |
 |---------|-------------|
 | `make check` | Run lint + all tests (use before committing) |
-| `make test` | Run all tests (`uv run pytest -q`) |
+| `make test` | Run all tests (e.g. `uv run pytest -q`) |
 
 Run the full quality suite before committing:
 

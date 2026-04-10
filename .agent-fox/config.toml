@@ -8,10 +8,12 @@ parallel = 2
 quality_gate = "make check"
 ## Maximum USD spend per session, 0 = unlimited (default: 8.0)
 max_budget_usd = 8.0
+## Abort if more than 40% of tasks are blocked
+max_blocked_fraction = 0.4
 
 [models]
 ## Model tier for coding tasks (default: "ADVANCED")
-coding = "ADVANCED"
+coding = "STANDARD"
 
 [archetypes]
 ## Enable coder archetype (default: true)
@@ -29,6 +31,24 @@ auditor = true
 ## Number of verifier instances (1-5, default: 2)
 verifier = 2
 
-# [security]
+[archetypes.thinking.coder]
+mode = "adaptive"
+budget_tokens = 32000
 
-## For all configuration options, see docs/config-reference.md
+[archetypes.thinking.skeptic]
+mode = "enabled"
+budget_tokens = 16000
+
+[archetypes.thinking.verifier]
+mode = "adaptive"
+budget_tokens = 32000
+
+[platform]
+type = "github"
+
+# [night_shift]
+# hunt_scan_interval = 14400
+
+# [night_shift.categories]
+# dead_code = false
+# todo_fixme = false
