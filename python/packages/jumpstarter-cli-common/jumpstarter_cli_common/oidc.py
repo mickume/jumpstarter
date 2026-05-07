@@ -36,6 +36,11 @@ warnings.filterwarnings(
     message=r"Unverified HTTPS request is being made.*",
     module=r"urllib3\..*",
 )
+from authlib.integrations.requests_client import OAuth2Session  # noqa: E402
+from joserfc.jws import extract_compact  # noqa: E402
+from yarl import URL  # noqa: E402
+
+from jumpstarter.config.env import JMP_OIDC_CALLBACK_PORT, JMP_OIDC_DEVICE_FLOW  # noqa: E402
 
 DEVICE_FLOW_POLL_INTERVAL = 5
 DEVICE_FLOW_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:device_code"
