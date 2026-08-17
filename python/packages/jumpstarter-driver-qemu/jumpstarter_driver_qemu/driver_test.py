@@ -134,6 +134,30 @@ def _mock_qemu_img_info(virtual_size):
     return mock
 
 
+def _mock_run_process_with_iso():
+    """Return a mock for run_process that handles ISO tool checks and creation."""
+
+    async def mock(cmd, **kwargs):
+        result = AsyncMock()
+        result.returncode = 0
+        result.stdout = b""
+        result.stderr = b""
+        result.check_returncode = lambda: None
+
+        # Handle ISO tool version check and ISO creation
+        if cmd and cmd[0] in ("genisoimage", "mkisofs", "xorriso"):
+            return result
+
+        # Handle qemu-img commands
+        if cmd and "qemu-img" in cmd[0]:
+            result.stdout = json.dumps({"format": "raw", "virtual-size": 1024}).encode()
+            return result
+
+        return result
+
+    return mock
+
+
 @pytest.mark.anyio
 async def test_resize_shrink_blocked(resize_test):
     """Shrinking disk should raise RuntimeError."""
@@ -692,8 +716,9 @@ async def test_virtio_transport_mmio_devices():
         raise RuntimeError("stop")
 
     with patch("jumpstarter_driver_qemu.driver.Popen", side_effect=mock_popen):
-        with pytest.raises(RuntimeError, match="stop"):
-            await power.on()
+        with patch("jumpstarter_driver_qemu.driver.run_process", side_effect=_mock_run_process_with_iso()):
+            with pytest.raises(RuntimeError, match="stop"):
+                await power.on()
 
     qemu_cmd = popen_calls[0]
     cmdline = " ".join(str(a) for a in qemu_cmd)
@@ -717,8 +742,9 @@ async def test_virtio_transport_pci_devices():
         raise RuntimeError("stop")
 
     with patch("jumpstarter_driver_qemu.driver.Popen", side_effect=mock_popen):
-        with pytest.raises(RuntimeError, match="stop"):
-            await power.on()
+        with patch("jumpstarter_driver_qemu.driver.run_process", side_effect=_mock_run_process_with_iso()):
+            with pytest.raises(RuntimeError, match="stop"):
+                await power.on()
 
     qemu_cmd = popen_calls[0]
     cmdline = " ".join(str(a) for a in qemu_cmd)
@@ -791,8 +817,9 @@ async def test_tpm_starts_swtpm_process():
         raise RuntimeError("stop before QEMU starts")
 
     with patch("jumpstarter_driver_qemu.driver.Popen", side_effect=mock_popen):
-        with pytest.raises(RuntimeError, match="stop before QEMU starts"):
-            await power.on()
+        with patch("jumpstarter_driver_qemu.driver.run_process", side_effect=_mock_run_process_with_iso()):
+            with pytest.raises(RuntimeError, match="stop before QEMU starts"):
+                await power.on()
 
     assert len(popen_calls) >= 1
     swtpm_cmd = popen_calls[0]
@@ -822,8 +849,9 @@ async def test_tpm_qemu_args_aarch64():
         raise RuntimeError("stop before QEMU starts")
 
     with patch("jumpstarter_driver_qemu.driver.Popen", side_effect=mock_popen):
-        with pytest.raises(RuntimeError, match="stop before QEMU starts"):
-            await power.on()
+        with patch("jumpstarter_driver_qemu.driver.run_process", side_effect=_mock_run_process_with_iso()):
+            with pytest.raises(RuntimeError, match="stop before QEMU starts"):
+                await power.on()
 
     qemu_cmd = popen_calls[1]
     assert "-chardev" in qemu_cmd
@@ -852,8 +880,9 @@ async def test_tpm_qemu_args_x86_64():
         raise RuntimeError("stop before QEMU starts")
 
     with patch("jumpstarter_driver_qemu.driver.Popen", side_effect=mock_popen):
-        with pytest.raises(RuntimeError, match="stop before QEMU starts"):
-            await power.on()
+        with patch("jumpstarter_driver_qemu.driver.run_process", side_effect=_mock_run_process_with_iso()):
+            with pytest.raises(RuntimeError, match="stop before QEMU starts"):
+                await power.on()
 
     qemu_cmd = popen_calls[1]
     assert "tpm-crb,tpmdev=tpm0" in qemu_cmd
@@ -873,8 +902,9 @@ async def test_tpm_not_started_when_disabled():
         raise RuntimeError("stop")
 
     with patch("jumpstarter_driver_qemu.driver.Popen", side_effect=mock_popen):
-        with pytest.raises(RuntimeError, match="stop"):
-            await power.on()
+        with patch("jumpstarter_driver_qemu.driver.run_process", side_effect=_mock_run_process_with_iso()):
+            with pytest.raises(RuntimeError, match="stop"):
+                await power.on()
 
     assert len(popen_calls) == 1
     assert popen_calls[0][0] != "swtpm"
@@ -938,6 +968,7 @@ async def test_tpm_socket_timeout():
         raise RuntimeError("should not reach QEMU")
 
     with patch("jumpstarter_driver_qemu.driver.Popen", side_effect=mock_popen):
-        with patch("jumpstarter_driver_qemu.driver.sleep", new_callable=AsyncMock):
-            with pytest.raises(RuntimeError, match="swtpm failed to start"):
-                await power.on()
+        with patch("jumpstarter_driver_qemu.driver.run_process", side_effect=_mock_run_process_with_iso()):
+            with patch("jumpstarter_driver_qemu.driver.sleep", new_callable=AsyncMock):
+                with pytest.raises(RuntimeError, match="swtpm failed to start"):
+                    await power.on()
