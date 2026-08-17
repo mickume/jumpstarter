@@ -9,6 +9,7 @@ from jumpstarter_driver_network.adapters import FabricAdapter, NovncAdapter
 
 from jumpstarter.client import FlasherClient
 from jumpstarter.client.flasher import PathBuf
+from jumpstarter.common.oci import resolve_oci_credentials
 from jumpstarter.streams.encoding import Compression
 
 
@@ -23,8 +24,17 @@ class QemuFlasherClient(FlasherClient):
         compression: Compression | None = None,
     ):
         if isinstance(path, str) and path.startswith("oci://"):
+            # Resolve credentials on the client side (where auth files exist)
+            # and forward them to the driver (exporter) which may not have access
+            # to the same auth files.
+            creds = resolve_oci_credentials(path)
+            oci_username = creds.username
+            oci_password = creds.plain_password
+
             returncode = 0
-            for stdout, stderr, code in self.streamingcall("flash_oci", path, target):
+            for stdout, stderr, code in self.streamingcall(
+                "flash_oci", path, target, oci_username, oci_password
+            ):
                 if stdout:
                     print(stdout, end="", flush=True)
                 if stderr:
