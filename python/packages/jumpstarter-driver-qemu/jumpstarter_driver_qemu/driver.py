@@ -219,13 +219,28 @@ class QemuPower(PowerInterface, Driver):
 
         cpu = self.parent.cpu
 
+        # Determine QEMU binary path
+        # In sidecar mode, assume runtime container has KVM and qemu-kvm
+        kvm_available = (
+            self.parent.launcher_socket is not None
+            or (self.parent.arch == platform.machine() and os.access("/dev/kvm", os.R_OK | os.W_OK))
+        )
+
+        if kvm_available:
+            # Try common locations for qemu-kvm
+            for qemu_binary in ["/usr/libexec/qemu-kvm", "/usr/bin/qemu-kvm", "qemu-kvm"]:
+                if self.parent.launcher_socket or Path(qemu_binary).exists() or "/" not in qemu_binary:
+                    break
+        else:
+            qemu_binary = f"qemu-system-{self.parent.arch}"
+
         cmdline = [
-            f"qemu-system-{self.parent.arch}",
+            qemu_binary,
             "-nodefaults",
             "-nographic",
         ]
 
-        if self.parent.arch == platform.machine() and os.access("/dev/kvm", os.R_OK | os.W_OK):
+        if kvm_available:
             cmdline += [
                 "-accel",
                 "kvm",
