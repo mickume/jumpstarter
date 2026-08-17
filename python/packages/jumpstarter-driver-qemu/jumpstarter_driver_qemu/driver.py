@@ -261,9 +261,7 @@ class QemuPower(PowerInterface, Driver):
             "-vga",
             "none",
             "-serial",
-            f"unix:{self.parent._serial_socket},server=on,wait=off"
-            if self.parent.launcher_socket
-            else "pty",
+            f"unix:{self.parent._serial_socket},server=on,wait=off" if self.parent.launcher_socket else "pty",
             "-netdev",
             ",".join(
                 ["user", "id=eth0"]
@@ -274,16 +272,30 @@ class QemuPower(PowerInterface, Driver):
             ),
         ]
 
+        suffix = self.parent._virtio_suffix
         devices = [
-            "virtio-net-pci,netdev=eth0",
-            "virtio-gpu-pci",
+            f"virtio-net{suffix},netdev=eth0",
+            f"virtio-gpu{suffix}",
         ]
 
         if _vsock_available():
-            devices.append("vhost-vsock-pci,guest-cid={}".format(self.parent._cid))
+            devices.append(f"vhost-vsock{suffix},guest-cid={self.parent._cid}")
 
         for device in devices:
             cmdline += ["-device", device]
+
+        if self.parent.tpm:
+            cmdline += [
+                "-chardev",
+                f"socket,id=chrtpm,path={self.parent._tpm_socket}",
+                "-tpmdev",
+                "emulator,id=tpm0,chardev=chrtpm",
+            ]
+            match self.parent.arch:
+                case "aarch64":
+                    cmdline += ["-device", "tpm-tis-device,tpmdev=tpm0"]
+                case "x86_64":
+                    cmdline += ["-device", "tpm-crb,tpmdev=tpm0"]
 
         if bios.exists():
             cmdline += [
@@ -351,7 +363,7 @@ class QemuPower(PowerInterface, Driver):
                 "-blockdev",
                 f"driver={image_driver},node-name=rootfs,file.driver=file,file.filename={root}",
                 "-device",
-                "virtio-blk-pci,drive=rootfs,bootindex=1",
+                f"virtio-blk{suffix},drive=rootfs,bootindex=1",
             ]
 
         self._cidata = self.parent.cidata()
@@ -360,8 +372,45 @@ class QemuPower(PowerInterface, Driver):
             "-blockdev",
             f"driver=vvfat,node-name=cidata,read-only=on,dir={self._cidata.name},label=CIDATA",
             "-device",
-            "virtio-blk-pci,drive=cidata",
+            f"virtio-blk{suffix},drive=cidata",
         ]
+
+        if self.parent.tpm:
+            self.parent._tpm_dir.mkdir(parents=True, exist_ok=True)
+            self._swtpm_process = Popen(
+                self.parent._wrap_command(
+                    [
+                        "swtpm",
+                        "socket",
+                        "--tpmstate",
+                        f"dir={self.parent._tpm_dir}",
+                        "--tpm2",
+                        "--ctrl",
+                        f"type=unixio,path={self.parent._tpm_socket}",
+                        "--flags",
+                        "not-need-init",
+                    ]
+                ),
+                stdin=PIPE,
+                stderr=PIPE,
+            )
+            for _ in range(50):
+                if Path(self.parent._tpm_socket).exists():
+                    break
+                rc = self._swtpm_process.poll()
+                if rc is not None:
+                    stderr = self._swtpm_process.stderr.read().decode() if self._swtpm_process.stderr else ""
+                    raise RuntimeError(f"swtpm exited prematurely with code {rc}: {stderr}")
+                await sleep(0.1)
+            else:
+                rc = self._swtpm_process.poll()
+                stderr = ""
+                if rc is not None and self._swtpm_process.stderr:
+                    stderr = self._swtpm_process.stderr.read().decode()
+                raise RuntimeError(
+                    f"swtpm failed to start: socket not created within 5 seconds (rc={rc}, stderr={stderr})"
+                )
+            self.logger.info("swtpm started successfully (pid=%d)", self._swtpm_process.pid)
 
         self._process = Popen(self.parent._wrap_command(cmdline), stdin=PIPE)
 
@@ -399,6 +448,14 @@ class QemuPower(PowerInterface, Driver):
         else:
             self.logger.warning("already powered off, ignoring request")
 
+        if hasattr(self, "_swtpm_process"):
+            self._swtpm_process.terminate()
+            try:
+                self._swtpm_process.wait(timeout=5)
+            except TimeoutExpired:
+                self._swtpm_process.kill()
+            del self._swtpm_process
+
         if hasattr(self, "_cidata"):
             del self._cidata
 
@@ -429,6 +486,8 @@ class Qemu(Driver):
     smp: int = 2
     mem: str = "512M"
     disk_size: str | None = None  # e.g., "20G" (resize disk before boot)
+    tpm: bool = False
+    virtio_transport: Literal["mmio", "pci"] = "mmio"
 
     hostname: str = "demo"
     username: str = "jumpstarter"
@@ -505,12 +564,33 @@ class Qemu(Driver):
     def _qmp(self) -> str:
         return str(Path(self._work_dir) / "qmp")
 
+    @property
+    def _virtio_suffix(self) -> str:
+        match self.virtio_transport:
+            case "pci":
+                return "-pci"
+            case "mmio":
+                return "-device"
+            case _:
+                raise ValueError(f"Unknown virtio transport: {self.virtio_transport}")
+
+    @property
+    def _tpm_dir(self) -> Path:
+        return Path(self._work_dir) / "tpm"
+
+    @property
+    def _tpm_socket(self) -> str:
+        return str(Path(self._work_dir) / "tpm.sock")
+
     def _wrap_command(self, cmd: list[str]) -> list[str]:
         """Wrap a command with jumpstarter-exec for remote execution in sidecar mode."""
         if self.launcher_socket:
             return [
                 str(Path(self._work_dir) / "jumpstarter-exec"),
-                "exec", "--socket", self.launcher_socket, "--",
+                "exec",
+                "--socket",
+                self.launcher_socket,
+                "--",
             ] + cmd
         return cmd
 
