@@ -304,16 +304,37 @@ def read_auth_file_credentials(oci_url: str) -> OciCredentials:
     return OciCredentials()
 
 
+def _read_password_file() -> str | None:
+    """Read OCI password from OCI_PASSWORD_FILE if set.
+
+    Supports projected service-account tokens on OpenShift / Kubernetes
+    where the kubelet rotates the token file periodically.
+    """
+    password_file = os.environ.get("OCI_PASSWORD_FILE")
+    if not password_file:
+        return None
+    try:
+        with open(password_file) as f:
+            password = f.read().strip()
+        if password:
+            logger.info("Read OCI password from OCI_PASSWORD_FILE")
+            return password
+    except OSError as e:
+        logger.warning("Failed to read OCI_PASSWORD_FILE (%s): %s", password_file, e)
+    return None
+
+
 def resolve_oci_credentials(
     oci_url: str,
     username: str | None = None,
     password: str | None = None,
 ) -> OciCredentials:
-    """Resolve OCI registry credentials with three-level precedence.
+    """Resolve OCI registry credentials with four-level precedence.
 
     1. Explicit ``username``/``password`` arguments (if either is non-empty).
-    2. ``OCI_USERNAME``/``OCI_PASSWORD`` environment variables.
-    3. Container auth files (auth.json / Docker config.json).
+    2. ``OCI_USERNAME`` + ``OCI_PASSWORD`` environment variables.
+    3. ``OCI_USERNAME`` + ``OCI_PASSWORD_FILE`` (for projected SA tokens).
+    4. Container auth files (auth.json / Docker config.json).
 
     Args:
         oci_url: OCI image reference (e.g. ``oci://quay.io/org/image:tag``).
@@ -336,9 +357,12 @@ def resolve_oci_credentials(
         if creds.is_authenticated:
             return creds
 
-    # Level 2: Environment variables
+    # Level 2 & 3: Environment variables (OCI_PASSWORD takes priority over OCI_PASSWORD_FILE)
     env_username = os.environ.get("OCI_USERNAME")
     env_password = os.environ.get("OCI_PASSWORD")
+
+    if not env_password:
+        env_password = _read_password_file()
 
     if env_username is not None or env_password is not None:
         try:
@@ -353,5 +377,5 @@ def resolve_oci_credentials(
                 logger.info("Using OCI registry credentials from environment variables")
                 return creds
 
-    # Level 3: Auth files
+    # Level 4: Auth files
     return read_auth_file_credentials(oci_url)
