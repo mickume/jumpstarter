@@ -776,8 +776,8 @@ class TestMonitorTokenExpiry:
     @patch("jumpstarter_cli.shell._attempt_token_recovery", new_callable=AsyncMock)
     @patch("jumpstarter_cli.shell.get_token_remaining_seconds")
     async def test_refreshes_when_below_threshold(self, mock_remaining, mock_recovery, mock_sleep, mock_click):
-        # First call: below threshold; second call: raise to exit
-        mock_remaining.side_effect = [60, Exception("done")]
+        # Below threshold, then the refreshed token, then raise to exit
+        mock_remaining.side_effect = [60, 3600, Exception("done")]
         mock_recovery.return_value = "Token refreshed automatically."
         config = _make_config()
         cancel_scope = Mock(cancel_called=False)
@@ -785,8 +785,27 @@ class TestMonitorTokenExpiry:
         await _monitor_token_expiry(config, _make_mock_lease(), cancel_scope)
 
         mock_recovery.assert_awaited_once()
-        # Should print the green success message
-        mock_click.echo.assert_called()
+        # A routine refresh the user was never warned about stays quiet: announcing
+        # each one turns a short token lifetime into a message every few minutes.
+        mock_click.echo.assert_not_called()
+
+    @patch("jumpstarter_cli.shell.click")
+    @patch("jumpstarter_cli.shell.anyio.sleep", new_callable=AsyncMock)
+    @patch("jumpstarter_cli.shell._attempt_token_recovery", new_callable=AsyncMock)
+    @patch("jumpstarter_cli.shell.get_token_remaining_seconds")
+    async def test_announces_recovery_after_a_warning(self, mock_remaining, mock_recovery, mock_sleep, mock_click):
+        """A refresh that clears a warning the user has already seen is worth saying."""
+        # Warn (no refresh token to renew with), then recover on the next pass
+        mock_remaining.side_effect = [290, 60, 3600, Exception("done")]
+        mock_recovery.return_value = "Token reloaded from login."
+        config = _make_config(refresh_token=None)
+        cancel_scope = Mock(cancel_called=False)
+
+        await _monitor_token_expiry(config, _make_mock_lease(), cancel_scope)
+
+        greens = [c for c in mock_click.style.call_args_list if c[1].get("fg") == "green"]
+        assert len(greens) == 1
+        assert "Token reloaded from login." in greens[0][0][0]
 
     @patch("jumpstarter_cli.shell.click")
     @patch("jumpstarter_cli.shell.anyio.sleep", new_callable=AsyncMock)
@@ -805,7 +824,9 @@ class TestMonitorTokenExpiry:
     @patch("jumpstarter_cli.shell.click")
     @patch("jumpstarter_cli.shell.anyio.sleep", new_callable=AsyncMock)
     @patch("jumpstarter_cli.shell.get_token_remaining_seconds")
-    async def test_warns_within_expiry_window(self, mock_remaining, mock_sleep, mock_click):
+    async def test_warns_within_expiry_window_without_a_refresh_token(
+        self, mock_remaining, mock_sleep, mock_click
+    ):
         from jumpstarter_cli_common.oidc import TOKEN_EXPIRY_WARNING_SECONDS
 
         # First iteration: within warning window but above refresh threshold
@@ -814,15 +835,48 @@ class TestMonitorTokenExpiry:
             TOKEN_EXPIRY_WARNING_SECONDS - 10,
             Exception("done"),
         ]
-        config = _make_config()
+        config = _make_config(refresh_token=None)
         cancel_scope = Mock(cancel_called=False)
 
         await _monitor_token_expiry(config, _make_mock_lease(), cancel_scope)
 
-        # Verify warning was echoed
+        # Verify the warning was echoed, and that it tells the user what to do
         mock_click.echo.assert_called()
         args = mock_click.style.call_args
-        assert "auto-refresh" in args[0][0]
+        assert "jmp login" in args[0][0]
+
+    @patch("jumpstarter_cli.shell.click")
+    @patch("jumpstarter_cli.shell.anyio.sleep", new_callable=AsyncMock)
+    @patch("jumpstarter_cli.shell.get_token_remaining_seconds")
+    async def test_does_not_warn_within_expiry_window_when_refresh_is_possible(
+        self, mock_remaining, mock_sleep, mock_click
+    ):
+        """A warning the monitor is about to act on itself is noise, not news."""
+        from jumpstarter_cli_common.oidc import TOKEN_EXPIRY_WARNING_SECONDS
+
+        mock_remaining.side_effect = [
+            TOKEN_EXPIRY_WARNING_SECONDS - 10,
+            Exception("done"),
+        ]
+        config = _make_config(refresh_token="rt")
+        cancel_scope = Mock(cancel_called=False)
+
+        await _monitor_token_expiry(config, _make_mock_lease(), cancel_scope)
+
+        mock_click.echo.assert_not_called()
+
+    @patch("jumpstarter_cli.shell.click")
+    @patch("jumpstarter_cli.shell.anyio.sleep", new_callable=AsyncMock)
+    @patch("jumpstarter_cli.shell.get_token_remaining_seconds")
+    async def test_warns_only_once_within_expiry_window(self, mock_remaining, mock_sleep, mock_click):
+        mock_remaining.side_effect = [290, 280, 270, Exception("done")]
+        config = _make_config(refresh_token=None)
+        cancel_scope = Mock(cancel_called=False)
+
+        await _monitor_token_expiry(config, _make_mock_lease(), cancel_scope)
+
+        yellows = [c for c in mock_click.style.call_args_list if c[1].get("fg") == "yellow"]
+        assert len(yellows) == 1
 
     @patch("jumpstarter_cli.shell.anyio.sleep", new_callable=AsyncMock)
     @patch("jumpstarter_cli.shell.get_token_remaining_seconds", return_value=500)
@@ -851,7 +905,7 @@ class TestMonitorTokenExpiry:
     @patch("jumpstarter_cli.shell._attempt_token_recovery", new_callable=AsyncMock)
     @patch("jumpstarter_cli.shell.get_token_remaining_seconds")
     async def test_sleeps_5s_when_below_threshold(self, mock_remaining, mock_recovery, mock_sleep, _mock_click):
-        mock_remaining.side_effect = [60, Exception("done")]
+        mock_remaining.side_effect = [60, 60, Exception("done")]
         mock_recovery.return_value = None
         config = _make_config()
         cancel_scope = Mock(cancel_called=False)
@@ -884,7 +938,7 @@ class TestMonitorTokenExpiry:
     ):
         """After a yellow 'approaching expiry' warning, a red 'expired' warning
         must still appear when the token actually crosses zero."""
-        mock_remaining.side_effect = [60, -5, Exception("done")]
+        mock_remaining.side_effect = [60, 60, -5, -5, Exception("done")]
         mock_recovery.return_value = None  # all recovery fails
         config = _make_config()
         cancel_scope = Mock(cancel_called=False)
