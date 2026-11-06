@@ -5,12 +5,12 @@ import click
 from jumpstarter_cli_common.blocking import blocking
 from jumpstarter_cli_common.config import opt_config
 from jumpstarter_cli_common.oidc import (
-    TOKEN_EXPIRY_WARNING_SECONDS,
     Config,
     decode_jwt,
     decode_jwt_issuer,
     format_duration,
     get_token_remaining_seconds,
+    token_expiry_warning_threshold,
 )
 from jumpstarter_cli_common.opt import DataOutputType, OutputMode, opt_output_json_yaml
 from jumpstarter_cli_common.print import model_print
@@ -67,7 +67,7 @@ def _collect_auth_status(config) -> AuthStatusV1Alpha1:
         status = "no-expiry"
     elif remaining < 0:
         status = "expired"
-    elif remaining < TOKEN_EXPIRY_WARNING_SECONDS:
+    elif remaining < token_expiry_warning_threshold(token_str):
         status = "expiring-soon"
     else:
         status = "valid"
@@ -84,7 +84,7 @@ def _collect_auth_status(config) -> AuthStatusV1Alpha1:
     })
 
 
-def _print_token_status(remaining: float) -> None:
+def _print_token_status(remaining: float, warning_threshold: float) -> None:
     """Print token status message based on remaining time."""
     duration = format_duration(remaining)
 
@@ -93,7 +93,7 @@ def _print_token_status(remaining: float) -> None:
     if remaining < 0:
         click.echo(click.style(f"Status: EXPIRED ({duration} ago)", fg="red", bold=True))
         click.echo(click.style(hint, fg="yellow"))
-    elif remaining < TOKEN_EXPIRY_WARNING_SECONDS:
+    elif remaining < warning_threshold:
         click.echo(click.style(f"Status: EXPIRING SOON ({duration} remaining)", fg="red", bold=True))
         click.echo(click.style(hint, fg="yellow"))
     elif remaining < 3600:
@@ -161,7 +161,7 @@ def token_status(config, verbose: bool, output: DataOutputType):
     exp_dt = datetime.fromtimestamp(exp, tz=UTC)
     click.echo(f"Token expiry: {exp_dt.strftime('%Y-%m-%d %H:%M:%S %Z')}")
 
-    _print_token_status(remaining)
+    _print_token_status(remaining, token_expiry_warning_threshold(token_str))
 
     _print_subject_issuer(payload)
 

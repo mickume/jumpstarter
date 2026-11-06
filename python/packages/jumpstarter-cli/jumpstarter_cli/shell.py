@@ -16,11 +16,12 @@ from anyio import create_task_group, get_cancelled_exc_class
 from jumpstarter_cli_common.config import opt_config
 from jumpstarter_cli_common.exceptions import find_exception_in_group, handle_exceptions_with_reauthentication
 from jumpstarter_cli_common.oidc import (
-    TOKEN_EXPIRY_WARNING_SECONDS,
     Config,
     decode_jwt_issuer,
     format_duration,
     get_token_remaining_seconds,
+    token_expiry_warning_threshold,
+    token_refresh_threshold,
 )
 from jumpstarter_cli_common.signal import signal_handler
 
@@ -52,9 +53,6 @@ from jumpstarter.config.exporter import ExporterConfigV1Alpha1
 from jumpstarter.config.tls import TLSConfigV1Alpha1
 
 logger = logging.getLogger(__name__)
-
-# Refresh token when less than this many seconds remain
-_TOKEN_REFRESH_THRESHOLD_SECONDS = 120
 
 # How often a client re-checks that it still has access to the lease. This
 # bounds the exposure window between an owner revoking a share (or transferring
@@ -218,11 +216,38 @@ def _warn_refresh_failed(remaining: float) -> None:
         )
 
 
+def _warn_manual_login_needed(config, remaining: float, warn_state) -> None:
+    """Warn ahead of expiry when this session cannot renew the token itself.
+
+    With a refresh token the monitor renews silently and in time, so a warning
+    would be noise the user can do nothing with. Without one, renewing is the
+    user's job and they need the runway to do it.
+    """
+    if warn_state["expiry"] or getattr(config, "refresh_token", None):
+        return
+    click.echo(
+        click.style(
+            f"\nToken expires in {format_duration(remaining)}. "
+            "Run 'jmp login' from this shell to refresh it.",
+            fg="yellow",
+            bold=True,
+        )
+    )
+    warn_state["expiry"] = True
+
+
 async def _handle_token_refresh(config, lease, remaining, warn_state, token_state=None) -> None:
     """Try to recover the token and update warning state accordingly."""
+    warned = warn_state["expiry"] or warn_state["refresh_failed"] or warn_state["token_expired"]
     recovery_msg = await _attempt_token_recovery(config, lease)
     if recovery_msg:
-        click.echo(click.style(f"\n{recovery_msg}", fg="green"))
+        # A routine proactive refresh is not news. Announcing every one turns a
+        # short token lifetime into a message every few minutes, so speak only
+        # when the user has already been told something was wrong.
+        if warned:
+            click.echo(click.style(f"\n{recovery_msg}", fg="green"))
+        else:
+            logger.debug("%s", recovery_msg)
         warn_state["expiry"] = False
         warn_state["refresh_failed"] = False
         warn_state["token_expired"] = False
@@ -247,6 +272,12 @@ async def _monitor_token_expiry(config, lease, cancel_scope, token_state=None) -
     3. If refresh fails, periodically checks the config on disk for a token
        refreshed externally (e.g. via 'jmp login' from within the shell)
     4. Never cancels the scope - the shell stays alive regardless
+    5. Stays quiet while it can renew the token itself, and speaks only when the
+       user has to do something about it
+
+    Both thresholds scale with the token's own lifetime, so an issuer minting
+    short-lived access tokens does not leave every token it signs permanently
+    inside the warning window.
     """
     token = getattr(config, "token", None)
     if not token:
@@ -256,25 +287,25 @@ async def _monitor_token_expiry(config, lease, cancel_scope, token_state=None) -
     while not cancel_scope.cancel_called:
         try:
             # Re-read config.token each iteration since it may have been refreshed
-            remaining = get_token_remaining_seconds(config.token)
+            token = config.token
+            remaining = get_token_remaining_seconds(token)
             if remaining is None:
                 return
 
-            if remaining <= _TOKEN_REFRESH_THRESHOLD_SECONDS:
+            if remaining <= token_refresh_threshold(token):
                 await _handle_token_refresh(config, lease, remaining, warn_state, token_state)
-            elif remaining <= TOKEN_EXPIRY_WARNING_SECONDS and not warn_state["expiry"]:
-                duration = format_duration(remaining)
-                click.echo(
-                    click.style(
-                        f"\nToken expires in {duration}. Will attempt auto-refresh.",
-                        fg="yellow",
-                        bold=True,
-                    )
-                )
-                warn_state["expiry"] = True
+                # A successful refresh replaced config.token, so re-measure:
+                # the poll interval below belongs to the new token, not to the
+                # expiring one that selected this branch.
+                token = config.token
+                remaining = get_token_remaining_seconds(token)
+                if remaining is None:
+                    return
+            elif remaining <= token_expiry_warning_threshold(token):
+                _warn_manual_login_needed(config, remaining, warn_state)
 
             # Check more frequently as we approach expiry
-            if remaining <= _TOKEN_REFRESH_THRESHOLD_SECONDS:
+            if remaining <= token_refresh_threshold(token):
                 await anyio.sleep(5)
             else:
                 await anyio.sleep(30)

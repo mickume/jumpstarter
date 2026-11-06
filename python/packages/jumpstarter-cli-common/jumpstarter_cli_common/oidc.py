@@ -354,9 +354,66 @@ def get_token_remaining_seconds(token: str) -> float | None:
     return exp - time.time()
 
 
-# Token expiry warning threshold in seconds (5 minutes)
+# Upper bounds on the two thresholds that drive token maintenance. Neither is
+# used raw: both are capped at a fraction of the token's own lifetime by the
+# helpers below.
+
+# A token is refreshed once this little of its validity remains.
+TOKEN_REFRESH_THRESHOLD_SECONDS = 120
+# A token that cannot be refreshed automatically is warned about this early.
 TOKEN_EXPIRY_WARNING_SECONDS = 300
 
+# The fractions of a token's lifetime the two bounds are capped at.
+_REFRESH_LIFETIME_FRACTION = 0.2
+_WARNING_LIFETIME_FRACTION = 0.1
+
+
+def get_token_lifetime_seconds(token: str) -> float | None:
+    """Get the total validity a token was issued with, from its iat and exp claims.
+
+    Returns None when either claim is absent or the pair does not describe a
+    positive lifetime, which is the signal to fall back to a fixed threshold.
+    """
+    payload = decode_jwt(token)
+    iat = payload.get("iat")
+    exp = payload.get("exp")
+    # bool is a subclass of int, and a boolean timestamp is not a timestamp.
+    if isinstance(iat, bool) or isinstance(exp, bool):
+        return None
+    if not isinstance(iat, int | float) or not isinstance(exp, int | float):
+        return None
+    lifetime = float(exp) - float(iat)
+    return lifetime if lifetime > 0 else None
+
+
+def _lifetime_capped(token: str, fixed: float, fraction: float) -> float:
+    try:
+        lifetime = get_token_lifetime_seconds(token)
+    except ValueError:
+        # Reporting an unparseable token is not this helper's job; callers learn
+        # about it from get_token_remaining_seconds.
+        return fixed
+    if lifetime is None:
+        return fixed
+    return min(fixed, lifetime * fraction)
+
+
+def token_refresh_threshold(token: str) -> float:
+    """Get the remaining validity at which a token should be proactively refreshed."""
+    return _lifetime_capped(token, TOKEN_REFRESH_THRESHOLD_SECONDS, _REFRESH_LIFETIME_FRACTION)
+
+
+def token_expiry_warning_threshold(token: str) -> float:
+    """Get the remaining validity at which a token counts as expiring soon.
+
+    A fixed window is wrong for short-lived tokens. An issuer minting 5 minute
+    access tokens (Keycloak's default) puts every token it signs inside a 300s
+    window the moment it is issued, so a fixed threshold latches on for a whole
+    session and re-arms after every refresh. Capping the window at a tenth of the
+    token's own lifetime is what the controller already does for exporter
+    credentials.
+    """
+    return _lifetime_capped(token, TOKEN_EXPIRY_WARNING_SECONDS, _WARNING_LIFETIME_FRACTION)
 
 
 def format_duration(seconds: float) -> str:

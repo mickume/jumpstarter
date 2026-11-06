@@ -1,3 +1,5 @@
+import base64
+import json
 import ssl
 import warnings
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -5,7 +7,16 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import click
 import pytest
 
-from jumpstarter_cli_common.oidc import Config, _get_ssl_context, should_use_device_flow
+from jumpstarter_cli_common.oidc import (
+    TOKEN_EXPIRY_WARNING_SECONDS,
+    TOKEN_REFRESH_THRESHOLD_SECONDS,
+    Config,
+    _get_ssl_context,
+    get_token_lifetime_seconds,
+    should_use_device_flow,
+    token_expiry_warning_threshold,
+    token_refresh_threshold,
+)
 
 
 class TestConfigInsecureTls:
@@ -362,3 +373,85 @@ class TestInsecureRequestWarningSuppressed:
             if len(f) >= 3 and f[0] == "ignore" and f[2] is urllib3.exceptions.InsecureRequestWarning
         ]
         assert len(matching_filters) > 0, "InsecureRequestWarning was not suppressed"
+
+
+def _jwt(**claims) -> str:
+    """Build an unsigned JWT carrying *claims*; only the payload is ever read."""
+
+    def segment(data: dict) -> str:
+        raw = base64.urlsafe_b64encode(json.dumps(data).encode()).decode()
+        return raw.rstrip("=")
+
+    return f"{segment({'alg': 'none'})}.{segment(claims)}.signature"
+
+
+class TestGetTokenLifetimeSeconds:
+    def test_returns_lifetime_from_iat_and_exp(self) -> None:
+        assert get_token_lifetime_seconds(_jwt(iat=1000, exp=4600)) == 3600
+
+    @pytest.mark.parametrize(
+        "claims",
+        [
+            pytest.param({"exp": 4600}, id="no-iat"),
+            pytest.param({"iat": 1000}, id="no-exp"),
+            pytest.param({}, id="neither"),
+            pytest.param({"iat": 1000, "exp": 1000}, id="zero-lifetime"),
+            pytest.param({"iat": 4600, "exp": 1000}, id="negative-lifetime"),
+            pytest.param({"iat": "1000", "exp": "4600"}, id="string-claims"),
+            # bool is a subclass of int, so it would otherwise pass the type check
+            pytest.param({"iat": True, "exp": True}, id="bool-claims"),
+        ],
+    )
+    def test_returns_none_without_a_usable_pair(self, claims) -> None:
+        assert get_token_lifetime_seconds(_jwt(**claims)) is None
+
+    def test_raises_on_a_token_that_is_not_a_jwt(self) -> None:
+        with pytest.raises(ValueError):
+            get_token_lifetime_seconds("not-a-jwt")
+
+
+class TestTokenThresholds:
+    def test_long_lived_token_uses_the_fixed_bounds(self) -> None:
+        """A day-long token is nowhere near either bound, so neither scales down."""
+        token = _jwt(iat=0, exp=86400)
+        assert token_expiry_warning_threshold(token) == TOKEN_EXPIRY_WARNING_SECONDS
+        assert token_refresh_threshold(token) == TOKEN_REFRESH_THRESHOLD_SECONDS
+
+    def test_short_lived_token_scales_both_bounds_down(self) -> None:
+        """Keycloak's default access token lifespan is 5 minutes."""
+        token = _jwt(iat=0, exp=300)
+        assert token_expiry_warning_threshold(token) == 30
+        assert token_refresh_threshold(token) == 60
+
+    def test_a_freshly_issued_token_is_never_already_expiring(self) -> None:
+        """The regression this guards: a fixed 300s window swallows a 5 minute
+        token whole, so the warning latched on for a whole session and re-armed
+        after every refresh."""
+        for lifetime in (60, 300, 600, 3600, 86400):
+            token = _jwt(iat=0, exp=lifetime)
+            assert token_expiry_warning_threshold(token) < lifetime
+            assert token_refresh_threshold(token) < lifetime
+
+    def test_warning_precedes_refresh_only_when_there_is_room_for_it(self) -> None:
+        """For a long-lived token the warning comes first, so a user with no refresh
+        token has time to act. For a short-lived one the refresh attempt comes first
+        instead, and _warn_refresh_failed is what speaks if it cannot help."""
+        long_lived = _jwt(iat=0, exp=86400)
+        assert token_expiry_warning_threshold(long_lived) > token_refresh_threshold(long_lived)
+
+        short_lived = _jwt(iat=0, exp=300)
+        assert token_expiry_warning_threshold(short_lived) < token_refresh_threshold(short_lived)
+
+    @pytest.mark.parametrize(
+        "token",
+        [
+            pytest.param(_jwt(exp=4600), id="no-iat"),
+            pytest.param("not-a-jwt", id="not-a-jwt"),
+        ],
+    )
+    def test_falls_back_to_the_fixed_bounds(self, token) -> None:
+        """A token that will not say how long it was issued for keeps the old
+        behaviour, and an unparseable one is reported by the caller's own expiry
+        check rather than by these helpers."""
+        assert token_expiry_warning_threshold(token) == TOKEN_EXPIRY_WARNING_SECONDS
+        assert token_refresh_threshold(token) == TOKEN_REFRESH_THRESHOLD_SECONDS
